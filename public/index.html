@@ -1,88 +1,189 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Morning Face Attendance</title>
-  <script defer src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <title>Smart Campus Face Attendance</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    video { border: 2px solid black; }
+    img { width: 120px; margin-top: 5px; display: block; }
+    li { margin-bottom: 15px; }
+  </style>
 </head>
 <body>
 
-<h1>Morning Face Attendance</h1>
-
-<h3 id="liveCount">Total Present Today: 0</h3>
-
-<h2>Register Student</h2>
+<h2>Register Student (7 Samples)</h2>
 <input id="studentId" placeholder="Student ID">
 <input id="name" placeholder="Name">
-<button onclick="registerFace()">Register Face</button>
+<button onclick="registerFace()">Register</button>
 
-<h2>Live Camera Attendance</h2>
-<video id="video" width="400" height="300" autoplay muted></video>
+<hr>
+
+<h2>Live Attendance</h2>
+<video id="video" width="640" height="480" autoplay muted></video>
+
+<hr>
+
+<h2>Today's Attendance</h2>
+<ul id="attendanceList"></ul>
 
 <script>
-const video = document.getElementById("video");
-const socket = io("http://localhost:5000");
 
-socket.on("attendanceUpdate", (data) => {
-  document.getElementById("liveCount").innerText =
-    "Total Present Today: " + data.totalPresent;
-});
+const video = document.getElementById("video");
+let attendanceMarked = false;
+
+/* ================= LOAD MODELS ================= */
 
 async function loadModels() {
-  await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
-  await faceapi.nets.faceLandmark68Net.loadFromUri('/models');
-  await faceapi.nets.faceRecognitionNet.loadFromUri('/models');
+  const URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+
+  await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(URL);
+  await faceapi.nets.faceRecognitionNet.loadFromUri(URL);
 }
 
+/* ================= START 720p CAMERA ================= */
+
 async function startVideo() {
-  const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    }
+  });
   video.srcObject = stream;
 }
 
+/* ================= GET FACE DESCRIPTOR ================= */
+
 async function getDescriptor() {
+
   const detection = await faceapi
-    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions())
+    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({
+      inputSize: 512,
+      scoreThreshold: 0.5
+    }))
     .withFaceLandmarks()
     .withFaceDescriptor();
 
   if (!detection) return null;
+
   return Array.from(detection.descriptor);
 }
 
+/* ================= REGISTER 7 SAMPLES ================= */
+
 async function registerFace() {
-  const descriptor = await getDescriptor();
-  if (!descriptor) return alert("No face detected");
 
-  const studentId = document.getElementById("studentId").value;
-  const name = document.getElementById("name").value;
+  const id = studentId.value;
+  const nm = name.value;
 
-  await fetch("/student/register", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ studentId, name, descriptor })
-  });
+  if (!id || !nm) {
+    alert("Enter Student ID and Name");
+    return;
+  }
 
-  alert("Face Registered");
+  alert("Keep face straight. Capturing 7 samples...");
+
+  for (let i = 0; i < 7; i++) {
+
+    const descriptor = await getDescriptor();
+
+    if (!descriptor) {
+      alert("Face not detected properly");
+      return;
+    }
+
+    await fetch("/student/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        studentId: id,
+        name: nm,
+        descriptor
+      })
+    });
+
+    await new Promise(r => setTimeout(r, 1500));
+  }
+
+  alert("7 Samples Registered Successfully");
 }
 
+/* ================= FACE ATTENDANCE ================= */
+
 async function recognizeLoop() {
+
+  if (attendanceMarked) return;
+
   const descriptor = await getDescriptor();
   if (!descriptor) return;
 
-  await fetch("/attendance/face-mark", {
+  // Capture image
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0);
+
+  const imageBase64 = canvas.toDataURL("image/png");
+
+  const res = await fetch("/attendance/face-mark", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ descriptor })
+    body: JSON.stringify({
+      descriptor,
+      image: imageBase64
+    })
+  });
+
+  const data = await res.json();
+
+  if (data.matched) {
+    attendanceMarked = true;
+    alert("Welcome " + data.student.name);
+    loadToday();
+  }
+}
+
+/* ================= LOAD TODAY ATTENDANCE ================= */
+
+async function loadToday() {
+
+  const res = await fetch("/attendance/today");
+  const data = await res.json();
+
+  const list = document.getElementById("attendanceList");
+  list.innerHTML = "";
+
+  data.forEach(student => {
+
+    const li = document.createElement("li");
+
+    li.innerHTML = `
+      <b>${student.studentId}</b> - ${student.name} 
+      <b style="color:green">(${student.status})</b>
+      <img src="${student.image}">
+    `;
+
+    list.appendChild(li);
   });
 }
+
+/* ================= START SYSTEM ================= */
 
 async function startSystem() {
   await loadModels();
   await startVideo();
+  loadToday();
   setInterval(recognizeLoop, 4000);
 }
 
 startSystem();
+
 </script>
 
 </body>

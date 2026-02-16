@@ -1,148 +1,142 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const bodyParser = require("body-parser");
-const http = require("http");
-const { Server } = require("socket.io");
+
+const Student = require("./models/Student");
+const Attendance = require("./models/Attendance");
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static("public"));
 
-/* ===========================
-   DATABASE
-=========================== */
+/* ================= DATABASE ================= */
+
 mongoose.connect("mongodb://127.0.0.1:27017/smartcampus")
   .then(() => console.log("MongoDB Connected"))
   .catch(err => console.log(err));
 
-/* ===========================
-   SCHEMAS
-=========================== */
-const studentSchema = new mongoose.Schema({
-  studentId: String,
-  name: String,
-  descriptor: [Number]
-});
+/* ================= REGISTER STUDENT ================= */
 
-const attendanceSchema = new mongoose.Schema({
-  studentId: String,
-  name: String,
-  date: { type: Date, default: Date.now }
-});
-
-const Student = mongoose.model("Student", studentSchema);
-const Attendance = mongoose.model("Attendance", attendanceSchema);
-
-/* ===========================
-   SOCKET
-=========================== */
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-});
-
-/* ===========================
-   REGISTER STUDENT FACE
-=========================== */
 app.post("/student/register", async (req, res) => {
-  const { studentId, name, descriptor } = req.body;
+  try {
+    const { studentId, name, descriptor } = req.body;
 
-  if (!studentId || !descriptor)
-    return res.status(400).json({ message: "Missing data" });
+    if (!studentId || !name || !descriptor) {
+      return res.status(400).json({ message: "Missing data" });
+    }
 
-  const existing = await Student.findOne({ studentId });
-  if (existing)
-    return res.json({ message: "Student already registered" });
+    let student = await Student.findOne({ studentId });
 
-  const student = new Student({ studentId, name, descriptor });
-  await student.save();
+    if (!student) {
+      student = new Student({
+        studentId,
+        name,
+        descriptors: [descriptor]
+      });
+    } else {
+      student.descriptors.push(descriptor);
+    }
 
-  res.json({ message: "Student registered successfully" });
+    await student.save();
+
+    res.json({ message: "Sample saved successfully" });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
-/* ===========================
-   FACE ATTENDANCE MARK
-=========================== */
-function euclideanDistance(a, b) {
-  return Math.sqrt(
-    a.map((x, i) => Math.pow(x - b[i], 2))
-      .reduce((sum, val) => sum + val, 0)
-  );
+/* ================= FACE MATCH FUNCTION ================= */
+
+function faceDistance(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    sum += Math.pow(a[i] - b[i], 2);
+  }
+  return Math.sqrt(sum);
 }
 
+/* ================= MARK ATTENDANCE ================= */
+
 app.post("/attendance/face-mark", async (req, res) => {
-  const { descriptor } = req.body;
+  try {
+    const { descriptor, image } = req.body;
 
-  const now = new Date();
-  const hour = now.getHours();
-
-  if (hour < 8 || hour > 10)
-    return res.json({ message: "Attendance allowed only 8AM-10AM" });
-
-  const students = await Student.find();
-
-  let matchedStudent = null;
-
-  for (let student of students) {
-    const distance = euclideanDistance(descriptor, student.descriptor);
-
-    if (distance < 0.6) {
-      matchedStudent = student;
-      break;
+    if (!descriptor) {
+      return res.status(400).json({ message: "No face descriptor" });
     }
+
+    const students = await Student.find();
+
+    let matchedStudent = null;
+    let minDistance = 1;
+
+    for (let student of students) {
+
+      for (let storedDescriptor of student.descriptors) {
+
+        const dist = faceDistance(storedDescriptor, descriptor);
+
+        if (dist < 0.6 && dist < minDistance) {
+          minDistance = dist;
+          matchedStudent = student;
+        }
+      }
+    }
+
+    if (!matchedStudent) {
+      return res.json({ message: "Face not recognized" });
+    }
+
+    // Only one attendance per day
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const alreadyMarked = await Attendance.findOne({
+      studentId: matchedStudent.studentId,
+      date: { $gte: today }
+    });
+
+    if (alreadyMarked) {
+      return res.json({ message: "Already marked today" });
+    }
+
+    await Attendance.create({
+      studentId: matchedStudent.studentId,
+      name: matchedStudent.name,
+      image
+    });
+
+    res.json({
+      message: "Attendance Marked",
+      name: matchedStudent.name
+    });
+
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ message: "Server error" });
   }
-
-  if (!matchedStudent)
-    return res.json({ message: "Face not recognized" });
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const alreadyMarked = await Attendance.findOne({
-    studentId: matchedStudent.studentId,
-    date: { $gte: today }
-  });
-
-  if (alreadyMarked)
-    return res.json({ message: "Already marked today" });
-
-  const attendance = new Attendance({
-    studentId: matchedStudent.studentId,
-    name: matchedStudent.name
-  });
-
-  await attendance.save();
-
-  const totalPresent = await Attendance.countDocuments({
-    date: { $gte: today }
-  });
-
-  io.emit("attendanceUpdate", { totalPresent });
-
-  res.json({ message: "Attendance marked for " + matchedStudent.name });
 });
 
-/* ===========================
-   VIEW TODAY ATTENDANCE
-=========================== */
+/* ================= GET TODAY ATTENDANCE ================= */
+
 app.get("/attendance/today", async (req, res) => {
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const data = await Attendance.find({
+  const records = await Attendance.find({
     date: { $gte: today }
   });
 
-  res.json(data);
+  res.json(records);
 });
 
-/* ===========================
-   SERVER START
-=========================== */
-server.listen(5000, () => {
+/* ================= START SERVER ================= */
+
+app.listen(5000, () => {
   console.log("Server running on port 5000");
 });

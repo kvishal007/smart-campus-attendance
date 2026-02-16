@@ -1,10 +1,12 @@
 const mongoose = require("mongoose");
 
 const studentSchema = new mongoose.Schema({
-  name: String,
-  email: String,
-  careerGoal: String,
-  interests: [String]
+  studentId: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  descriptors: {
+    type: [[Number]],   // multiple face samples
+    required: true
+  }
 });
 
 module.exports = mongoose.model("Student", studentSchema);
